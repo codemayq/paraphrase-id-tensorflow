@@ -42,7 +42,7 @@ class NLTKWordTokenizer():
             representation of the string, as a list of tokens.
         """
         words = self.tokenize(text)
-        characters = [char for word in words for char in word]
+        characters = [list(word) for word in words]
         return {"words": words, "characters": characters}
 
     def index_text(self, tokenized_sentence, data_indexer):
