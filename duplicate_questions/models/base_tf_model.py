@@ -9,7 +9,7 @@ from ..data.data_manager import DataManager
 logger = logging.getLogger(__name__)
 
 
-class BaseTFModel:
+class BaseTFModel(object):
     """
     This class is a base model class for Tensorflow that other Tensorflow
     models should inherit from. It defines a unifying API for training and
@@ -32,6 +32,12 @@ class BaseTFModel:
         self.y_pred = None
         self.loss = None
         self.accuracy = None
+        self.pre_cate = None
+
+        self.precision = None
+        self.recall = None
+        self.f1 = None
+        self.acc = None
 
         self.training_op = None
         self.summary_op = None
@@ -184,15 +190,15 @@ class BaseTFModel:
                                         leave=False):
                     global_step = sess.run(self.global_step) + 1
 
-                    inputs, targets = train_batch
+                    # inputs, targets = train_batch
                     feed_dict = self._get_train_feed_dict(train_batch)
 
                     # Do a gradient update, and log results to Tensorboard
                     # if necessary.
                     if global_step % log_period == 0:
                         # Record summary with gradient update
-                        train_loss, _, train_summary = sess.run(
-                            [self.loss, self.training_op, self.summary_op],
+                        train_loss, _, train_summary, train_f1 = sess.run(
+                            [self.loss, self.training_op, self.summary_op, self.f1],
                             feed_dict=feed_dict)
                         train_writer.add_summary(train_summary, global_step)
                     else:
@@ -203,7 +209,7 @@ class BaseTFModel:
 
                     if global_step % val_period == 0:
                         # Evaluate on validation data
-                        val_acc, val_loss, val_summary = self._evaluate_on_validation(
+                        val_acc, val_loss, val_f1, val_summary = self._evaluate_on_validation(
                             get_val_instance_generator=get_val_instance_generator,
                             batch_size=batch_size,
                             num_val_steps=num_val_steps,
@@ -216,7 +222,7 @@ class BaseTFModel:
                 # End of the epoch, so save the model and check validation loss,
                 # stopping if applicable.
                 saver.save(sess, save_path, global_step=global_step)
-                val_acc, val_loss, val_summary = self._evaluate_on_validation(
+                val_acc, val_loss, val_f1, val_summary = self._evaluate_on_validation(
                     get_val_instance_generator=get_val_instance_generator,
                     batch_size=batch_size,
                     num_val_steps=num_val_steps,
@@ -231,7 +237,7 @@ class BaseTFModel:
                 if patience_val_losses:
                     min_patience_val_loss = min(patience_val_losses)
                 else:
-                    min_patience_val_loss = math.inf
+                    min_patience_val_loss = float('inf')
                 if min_patience_val_loss <= val_loss:
                     # past loss was lower, so stop
                     logger.info("Validation loss of {} in last {} "
@@ -290,14 +296,21 @@ class BaseTFModel:
                 get_test_instance_generator, batch_size)
 
             y_pred = []
+            line_id_lists = []
             for batch in tqdm(test_batch_gen,
                               total=num_test_steps,
                               desc="Test Batches Completed"):
+                line_id_lists.extend(batch[-1])
                 feed_dict = self._get_test_feed_dict(batch)
-                y_pred_batch = sess.run(self.y_pred, feed_dict=feed_dict)
+                y_pred_batch = sess.run(self.pre_cate, feed_dict=feed_dict)
                 y_pred.append(y_pred_batch)
             y_pred_flat = np.concatenate(y_pred, axis=0)
-        return y_pred_flat
+
+        line_ids = []
+        for line_id_list in line_id_lists:
+            line_ids.extend(line_id_list.tolist())
+
+        return y_pred_flat, line_ids
 
     def _evaluate_on_validation(self, get_val_instance_generator,
                                 batch_size,
@@ -309,29 +322,38 @@ class BaseTFModel:
         # over the validation set.
         val_accuracies = []
         val_losses = []
+        val_f1s = []
         for val_batch in tqdm(val_batch_gen,
                               total=num_val_steps,
                               desc="Validation Batches Completed",
                               leave=False):
             feed_dict = self._get_validation_feed_dict(val_batch)
-            val_batch_acc, val_batch_loss = session.run(
-                [self.accuracy, self.loss],
+            val_batch_acc, val_batch_loss, val_f1 = session.run(
+                [self.accuracy, self.loss, self.f1],
                 feed_dict=feed_dict)
 
             val_accuracies.append(val_batch_acc)
             val_losses.append(val_batch_loss)
+            # TODO here has a bug, last epoch f1 will be nan
+            if not math.isnan(val_f1):
+                val_f1s.append(val_f1)
+                # logger.info("eval f1 " + str(val_f1))
 
         # Take the mean of the accuracies and losses.
         # TODO/FIXME this assumes each batch is same shape, which
         # is not necessarily true.
         mean_val_accuracy = np.mean(val_accuracies)
         mean_val_loss = np.mean(val_losses)
-
+        mean_val_f1 = np.mean(val_f1s)
+        logger.info("eval f1 " + str(mean_val_f1))
         # Create a new Summary object with mean_val accuracy
         # and mean_val_loss and add it to Tensorboard.
         val_summary = tf.Summary(value=[
             tf.Summary.Value(tag="val_summaries/loss",
                              simple_value=mean_val_loss),
             tf.Summary.Value(tag="val_summaries/accuracy",
-                             simple_value=mean_val_accuracy)])
-        return mean_val_accuracy, mean_val_loss, val_summary
+                             simple_value=mean_val_accuracy),
+            tf.Summary.Value(tag="val_summaries/f1",
+                             simple_value=mean_val_f1),
+        ])
+        return mean_val_accuracy, mean_val_loss,mean_val_f1, val_summary

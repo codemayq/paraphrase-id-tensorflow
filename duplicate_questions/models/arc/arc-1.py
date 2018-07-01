@@ -85,6 +85,7 @@ class SiameseMatchingBiLSTM(BaseTFModel):
         self.share_encoder_weights = config_dict.pop("share_encoder_weights")
         self.output_keep_prob = config_dict.pop("output_keep_prob")
 
+        self.sequence_length = config_dict.pop("num_sentence_words")
         if config_dict:
             logger.warning("UNUSED VALUES IN CONFIG DICT: {}".format(config_dict))
 
@@ -164,75 +165,74 @@ class SiameseMatchingBiLSTM(BaseTFModel):
                 word_embedded_sentence_one = tf.nn.embedding_lookup(
                     word_emb_mat,
                     self.sentence_one)
+                self.word_embedded_sentence_one_expanded = tf.expand_dims(word_embedded_sentence_one, -1)
                 # Shape: (batch_size, num_sentence_words, embedding_dim)
                 word_embedded_sentence_two = tf.nn.embedding_lookup(
                     word_emb_mat,
                     self.sentence_two)
+                self.word_embedded_sentence_one_expanded = tf.expand_dims(word_embedded_sentence_two, -1)
+
+        num_filters = 256
+        filter_sizes = [1,2,3,4,5,6]
+        embedding_size = 300
+
+
+        pooled_outputs = []
+        for i, filter_size in enumerate(filter_sizes):
+            with tf.name_scope("conv-maxpool-%s" % filter_size):
+                # Convolution Layer
+                filter_shape = [filter_size, embedding_size, 1, num_filters]
+                W = tf.Variable(tf.truncated_normal(filter_shape, stddev=0.1), name="W")
+                b = tf.Variable(tf.constant(0.1, shape=[num_filters]), name="b")
+                conv = tf.nn.conv2d(
+                    self.word_embedded_sentence_one_expanded,
+                    W,
+                    strides=[1, 1, 1, 1],
+                    padding="VALID",
+                    name="conv")
+
+                # Apply nonlinearity
+                h = tf.nn.relu(tf.nn.bias_add(conv, b), name="relu")
+                # Maxpooling over the outputs
+                pooled = tf.nn.max_pool(
+                    h,
+                    ksize=[1, self.sequence_length - filter_size + 1, 1, 1],
+                    strides=[1, 1, 1, 1],
+                    padding='VALID',
+                    name="pool")
+                pooled_outputs.append(pooled)
+
+        # Combine all the pooled features
+        num_filters_total = num_filters * len(filter_sizes)
+        self.h_pool = tf.concat(pooled_outputs, 3)
+        self.h_pool_flat = tf.reshape(self.h_pool, [-1, num_filters_total])
+
+        # Add dropout
+        with tf.name_scope("dropout"):
+            self.h_drop = tf.nn.dropout(self.h_pool_flat, self.output_keep_prob)
+
+        l2_loss = tf.constant(0.0)
+        # Final (unnormalized) scores and predictions
+        with tf.name_scope("output"):
+            W = tf.get_variable(
+                "W",
+                shape=[num_filters_total, 2],
+                initializer=tf.contrib.layers.xavier_initializer())
+            b = tf.Variable(tf.constant(0.1, shape=[2]), name="b")
+            l2_loss += tf.nn.l2_loss(W)
+            l2_loss += tf.nn.l2_loss(b)
+            self.scores = tf.nn.xw_plus_b(self.h_drop, W, b, name="scores")
+            self.predictions = tf.argmax(self.scores, 1, name="predictions")
+
 
         rnn_hidden_size = self.rnn_hidden_size
         output_keep_prob = self.output_keep_prob
-        rnn_cell_fw_one = LSTMCell(rnn_hidden_size, state_is_tuple=True)
-        d_rnn_cell_fw_one = SwitchableDropoutWrapper(rnn_cell_fw_one,
-                                                     self.is_train,
-                                                     output_keep_prob=output_keep_prob)
-        rnn_cell_bw_one = LSTMCell(rnn_hidden_size, state_is_tuple=True)
-        d_rnn_cell_bw_one = SwitchableDropoutWrapper(rnn_cell_bw_one,
-                                                     self.is_train,
-                                                     output_keep_prob=output_keep_prob)
-        with tf.variable_scope("encode_sentences"):
-            # Encode the first sentence.
-            (fw_output_one, bw_output_one), _ = tf.nn.bidirectional_dynamic_rnn(
-                cell_fw=d_rnn_cell_fw_one,
-                cell_bw=d_rnn_cell_bw_one,
-                dtype="float",
-                sequence_length=sentence_one_len,
-                inputs=word_embedded_sentence_one,
-                scope="encoded_sentence_one")
-            if self.share_encoder_weights:
-                # Encode the second sentence, using the same RNN weights.
-                tf.get_variable_scope().reuse_variables()
-                (fw_output_two, bw_output_two), _ = tf.nn.bidirectional_dynamic_rnn(
-                    cell_fw=d_rnn_cell_fw_one,
-                    cell_bw=d_rnn_cell_bw_one,
-                    dtype="float",
-                    sequence_length=sentence_two_len,
-                    inputs=word_embedded_sentence_two,
-                    scope="encoded_sentence_one")
-            else:
-                # Encode the second sentence with a different RNN
-                rnn_cell_fw_two = LSTMCell(rnn_hidden_size, state_is_tuple=True)
-                d_rnn_cell_fw_two = SwitchableDropoutWrapper(
-                    rnn_cell_fw_two,
-                    self.is_train,
-                    output_keep_prob=output_keep_prob)
-                rnn_cell_bw_two = LSTMCell(rnn_hidden_size, state_is_tuple=True)
-                d_rnn_cell_bw_two = SwitchableDropoutWrapper(
-                    rnn_cell_bw_two,
-                    self.is_train,
-                    output_keep_prob=output_keep_prob)
-                (fw_output_two, bw_output_two), _ = tf.nn.bidirectional_dynamic_rnn(
-                    cell_fw=d_rnn_cell_fw_two,
-                    cell_bw=d_rnn_cell_bw_two,
-                    dtype="float",
-                    sequence_length=sentence_two_len,
-                    inputs=word_embedded_sentence_two,
-                    scope="encoded_sentence_two")
 
-            # Now, combine the fw_output and bw_output for the
-            # first and second sentence LSTM outputs by mean pooling
-            pooled_fw_output_one = mean_pool(fw_output_one,
-                                             sentence_one_len)
-            pooled_bw_output_one = mean_pool(bw_output_one,
-                                             sentence_one_len)
-            pooled_fw_output_two = mean_pool(fw_output_two,
-                                             sentence_two_len)
-            pooled_bw_output_two = mean_pool(bw_output_two,
-                                             sentence_two_len)
-            # Shape: (batch_size, 2*rnn_hidden_size)
-            encoded_sentence_one = tf.concat([pooled_fw_output_one,
-                                              pooled_bw_output_one], 1)
-            encoded_sentence_two = tf.concat([pooled_fw_output_two,
-                                              pooled_bw_output_two], 1)
+
+
+
+
+
 
         # Sentence matching layer
         with tf.name_scope("match_sentences"):

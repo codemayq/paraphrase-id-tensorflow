@@ -1,9 +1,15 @@
+# coding=UTF-8
 import argparse
 import csv
 import logging
 import re
 import os
+import sys
 
+import six
+if six.PY2:
+    reload(sys)
+    sys.setdefaultencoding('utf-8')
 
 logger = logging.getLogger(__name__)
 

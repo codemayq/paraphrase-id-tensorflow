@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env
 # Create the cleaned, split final quora dataset from the raw text files
 # The raw text files are assumed to be put in "./data/processed/raw"
 

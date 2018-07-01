@@ -91,9 +91,9 @@ class BiMPM(BaseTFModel):
         self.word_embedding_dim = config_dict.pop("word_embedding_dim")
         self.word_embedding_matrix = config_dict.pop("word_embedding_matrix", None)
         self.char_vocab_size = config_dict.pop("char_vocab_size")
-        self.char_embedding_dim = config_dict.pop("char_embedding_dim")
-        self.char_embedding_matrix = config_dict.pop("char_embedding_matrix", None)
-        self.char_rnn_hidden_size = config_dict.pop("char_rnn_hidden_size")
+        # self.char_embedding_dim = config_dict.pop("char_embedding_dim")
+        # self.char_embedding_matrix = config_dict.pop("char_embedding_matrix", None)
+        # self.char_rnn_hidden_size = config_dict.pop("char_rnn_hidden_size")
         self.fine_tune_embeddings = config_dict.pop("fine_tune_embeddings")
         self.context_rnn_hidden_size = config_dict.pop("context_rnn_hidden_size")
         self.aggregation_rnn_hidden_size = config_dict.pop("aggregation_rnn_hidden_size")
@@ -114,21 +114,11 @@ class BiMPM(BaseTFModel):
                                                 [None, None],
                                                 name="sentence_one_word")
 
-        # Shape: (batch_size, num_sentence_words, num_word_characters)
-        # The first input sentence, indexed by character.
-        self.sentence_one_char = tf.placeholder("int32",
-                                                [None, None, None],
-                                                name="sentence_one_char")
         # Shape: (batch_size, num_sentence_words)
         # The second input sentence, indexed by word.
         self.sentence_two_word = tf.placeholder("int32",
                                                 [None, None],
                                                 name="sentence_two_word")
-        # Shape: (batch_size, num_sentence_words, num_word_characters)
-        # The second input sentence, indexed by character.
-        self.sentence_two_char = tf.placeholder("int32",
-                                                [None, None, None],
-                                                name="sentence_two_char")
 
         # Shape: (batch_size, 2)
         # The true labels, encoded as a one-hot vector. So
@@ -150,8 +140,6 @@ class BiMPM(BaseTFModel):
             batch_size = tf.shape(self.sentence_one_word)[0]
             # The number of words in a sentence.
             num_sentence_words = tf.shape(self.sentence_one_word)[1]
-            # The number of characters in a word
-            num_word_characters = tf.shape(self.sentence_one_char)[2]
 
             # A mask over the word indices in the sentence, indicating
             # which indices are padding and which are words.
@@ -161,33 +149,16 @@ class BiMPM(BaseTFModel):
             sentence_two_wordlevel_mask = tf.sign(self.sentence_two_word,
                                                   name="sentence_two_word_mask")
 
-            # A mask over the char indices in the char indexed sentence, indicating
-            # which indices are padding and which are chars.
-            # Shape: (batch_size, num_sentence_words, num_word_characters)
-            sentence_one_charlevel_mask = tf.sign(self.sentence_one_char,
-                                                  name="sentence_one_char_mask")
-            sentence_two_charlevel_mask = tf.sign(self.sentence_two_char,
-                                                  name="sentence_two_char_mask")
-
             # The unpadded word lengths of sentence one and sentence two
             # Shape: (batch_size,)
             sentence_one_len = tf.reduce_sum(sentence_one_wordlevel_mask, 1)
             sentence_two_len = tf.reduce_sum(sentence_two_wordlevel_mask, 1)
-
-            # The unpadded character lengths of each of the words in sentence one
-            # and sentence two.
-            # Shape: (batch_size, num_sentence_words)
-            sentence_one_words_len = tf.reduce_sum(sentence_one_charlevel_mask, 2)
-            sentence_two_words_len = tf.reduce_sum(sentence_two_charlevel_mask, 2)
 
         with tf.variable_scope("embeddings"):
             # Embedding variables
             word_vocab_size = self.word_vocab_size
             word_embedding_dim = self.word_embedding_dim
             word_embedding_matrix = self.word_embedding_matrix
-            char_vocab_size = self.char_vocab_size
-            char_embedding_dim = self.char_embedding_dim
-            char_embedding_matrix = self.char_embedding_matrix
             fine_tune_embeddings = self.fine_tune_embeddings
 
             with tf.variable_scope("embedding_var"):
@@ -202,13 +173,6 @@ class BiMPM(BaseTFModel):
                         initializer=tf.constant_initializer(
                             word_embedding_matrix),
                         trainable=fine_tune_embeddings)
-                    char_emb_mat = tf.get_variable(
-                        "char_emb_mat",
-                        dtype="float",
-                        shape=[char_vocab_size,
-                               char_embedding_dim],
-                        initializer=tf.constant_initializer(
-                            char_embedding_matrix))
                 else:
                     # We are not training, so a model should have been
                     # loaded with the embedding matrices already there.
@@ -217,10 +181,6 @@ class BiMPM(BaseTFModel):
                                                           word_embedding_dim],
                                                    dtype="float",
                                                    trainable=fine_tune_embeddings)
-                    char_emb_mat = tf.get_variable("char_emb_mat",
-                                                   shape=[char_vocab_size,
-                                                          char_embedding_dim],
-                                                   dtype="float")
 
             # Retrieve the word embeddings for the sentence.
             with tf.name_scope("word_embeddings"):
@@ -233,88 +193,15 @@ class BiMPM(BaseTFModel):
                     word_emb_mat,
                     self.sentence_two_word)
 
-            # Construct the character embedding for each word in the sentence.
-            with tf.name_scope("char_embeddings"):
-                # Shapes: (batch_size, num_sentence_words,
-                #          num_word_characters, char_embed_dim)
-                char_embedded_sentence_one = tf.nn.embedding_lookup(
-                    char_emb_mat,
-                    self.sentence_one_char)
-                char_embedded_sentence_two = tf.nn.embedding_lookup(
-                    char_emb_mat,
-                    self.sentence_two_char)
-                # Need to flatten it for the shape to be compatible with the RNN.
-                # Shapes: (batch_size*num_sentence_words,
-                #          num_word_characters, char_embed_dim)
-                flat_char_embedded_sentence_one = tf.reshape(
-                    char_embedded_sentence_one,
-                    [batch_size * num_sentence_words,
-                     num_word_characters, char_embedding_dim])
-                flat_char_embedded_sentence_two = tf.reshape(
-                    char_embedded_sentence_two,
-                    [batch_size * num_sentence_words, num_word_characters,
-                     char_embedding_dim])
-                # Shapes: (batch_size*num_sentence_words,)
-                flat_sentence_one_words_len = tf.reshape(
-                    sentence_one_words_len,
-                    [batch_size * num_sentence_words])
-                flat_sentence_two_words_len = tf.reshape(
-                    sentence_two_words_len,
-                    [batch_size * num_sentence_words])
-
-                # Encode the character vectors into a word vector.
-                with tf.variable_scope("char_lstm"):
-                    char_rnn_hidden_size = self.char_rnn_hidden_size
-                    dropout_ratio = self.dropout_ratio
-                    char_lstm_cell = LSTMCell(char_rnn_hidden_size)
-                    sentence_one_char_output, _ = tf.nn.dynamic_rnn(
-                        char_lstm_cell,
-                        dtype="float",
-                        sequence_length=flat_sentence_one_words_len,
-                        inputs=flat_char_embedded_sentence_one)
-                    d_sentence_one_char_output = tf.layers.dropout(
-                        sentence_one_char_output,
-                        rate=dropout_ratio,
-                        training=self.is_train,
-                        name="sentence_one_char_lstm_dropout")
-                    tf.get_variable_scope().reuse_variables()
-                    sentence_two_char_output, _ = tf.nn.dynamic_rnn(
-                        char_lstm_cell,
-                        dtype="float",
-                        sequence_length=flat_sentence_two_words_len,
-                        inputs=flat_char_embedded_sentence_two)
-                    d_sentence_two_char_output = tf.layers.dropout(
-                        sentence_two_char_output,
-                        rate=dropout_ratio,
-                        training=self.is_train,
-                        name="sentence_two_char_lstm_dropout")
-                    # Get the last relevant output of the LSTM with respect
-                    # to sequence length.
-                    # Shapes: (batch_size*num_sentence_words, char_rnn_hidden_size)
-                    flat_sentence_one_char_repr = last_relevant_output(
-                        d_sentence_one_char_output,
-                        flat_sentence_one_words_len)
-                    flat_sentence_two_char_repr = last_relevant_output(
-                        d_sentence_two_char_output,
-                        flat_sentence_two_words_len)
-                    # Take the RNN output of the flat representation and transform it back
-                    # into the original shape.
-                    # Shapes: (batch_size, num_sentence_words, char_rnn_hidden_size)
-                    sentence_one_char_repr = tf.reshape(
-                        flat_sentence_one_char_repr,
-                        [batch_size, num_sentence_words, char_rnn_hidden_size])
-                    sentence_two_char_repr = tf.reshape(
-                        flat_sentence_two_char_repr,
-                        [batch_size, num_sentence_words, char_rnn_hidden_size])
-
             # Combine the word-level and character-level representations.
             # Shapes: (batch_size, num_sentence_words,
             #          word_embed_dim+char_rnn_hidden_size)
             embedded_sentence_one = tf.concat([word_embedded_sentence_one,
-                                               sentence_one_char_repr], 2)
+                                               ], 2)
             embedded_sentence_two = tf.concat([word_embedded_sentence_two,
-                                               sentence_two_char_repr], 2)
+                                               ], 2)
 
+            dropout_ratio = self.dropout_ratio
             # Apply dropout to the embeddings, but only if we are training.
             # Shapes: (batch_size, num_sentence_words,
             #          word_embed_dim+char_rnn_hidden_size)
@@ -498,7 +385,7 @@ class BiMPM(BaseTFModel):
                     logits=predict_layer_two_logits,
                     name="xentropy_loss"))
 
-        self.pre_cate = tf.argmax(self.y_pred, 1)
+
         argmax_pred = tf.argmax(self.y_pred, 1)
         argmax_true = tf.argmax(self.y_true, 1)
 
@@ -555,20 +442,20 @@ class BiMPM(BaseTFModel):
     def _get_train_feed_dict(self, batch):
         inputs, targets, lineids = batch
         feed_dict = {self.sentence_one_word: inputs[0],
-                     self.sentence_one_char: inputs[1],
+                     # self.sentence_one_char: inputs[1],
                      self.sentence_two_word: inputs[2],
-                     self.sentence_two_char: inputs[3],
+                     # self.sentence_two_char: inputs[3],
                      self.y_true: targets[0],
                      self.is_train: True}
         return feed_dict
 
     @overrides
     def _get_validation_feed_dict(self, batch):
-        inputs, targets, lineids = batch
+        inputs, targets, lineids  = batch
         feed_dict = {self.sentence_one_word: inputs[0],
-                     self.sentence_one_char: inputs[1],
+                     # self.sentence_one_char: inputs[1],
                      self.sentence_two_word: inputs[2],
-                     self.sentence_two_char: inputs[3],
+                     # self.sentence_two_char: inputs[3],
                      self.y_true: targets[0],
                      self.is_train: False}
         return feed_dict
@@ -577,8 +464,8 @@ class BiMPM(BaseTFModel):
     def _get_test_feed_dict(self, batch):
         inputs, _, lineids = batch
         feed_dict = {self.sentence_one_word: inputs[0],
-                     self.sentence_one_char: inputs[1],
+                     # self.sentence_one_char: inputs[1],
                      self.sentence_two_word: inputs[2],
-                     self.sentence_two_char: inputs[3],
+                     # self.sentence_two_char: inputs[3],
                      self.is_train: False}
         return feed_dict

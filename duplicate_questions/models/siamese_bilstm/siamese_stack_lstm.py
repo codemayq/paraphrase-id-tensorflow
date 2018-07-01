@@ -12,7 +12,7 @@ from ...util.rnn import last_relevant_output
 logger = logging.getLogger(__name__)
 
 
-class SiameseBiLSTM(BaseTFModel):
+class SiameseStackLSTM(BaseTFModel):
     """
     Create a model based off of "Siamese Recurrent Architectures for Learning
     Sentence Similarity" at AAAI '16. The model is super simple: just encode
@@ -72,7 +72,7 @@ class SiameseBiLSTM(BaseTFModel):
     def __init__(self, config_dict):
         config_dict = deepcopy(config_dict)
         mode = config_dict.pop("mode")
-        super(SiameseBiLSTM, self).__init__(mode=mode)
+        super(SiameseStackLSTM, self).__init__(mode=mode)
 
         self.word_vocab_size = config_dict.pop("word_vocab_size")
         self.word_embedding_dim = config_dict.pop("word_embedding_dim")
@@ -82,7 +82,10 @@ class SiameseBiLSTM(BaseTFModel):
         self.share_encoder_weights = config_dict.pop("share_encoder_weights")
         self.rnn_output_mode = config_dict.pop("rnn_output_mode")
         self.output_keep_prob = config_dict.pop("output_keep_prob")
-
+        self.num_sentence_words = config_dict.pop("num_sentence_words")
+        # TODO num_classes
+        self.num_classes = 2
+        self.l2_lambda = config_dict.pop("l2_lambda")
         if config_dict:
             logger.warning("UNUSED VALUES IN CONFIG DICT: {}".format(config_dict))
 
@@ -95,25 +98,30 @@ class SiameseBiLSTM(BaseTFModel):
         # Shape: (batch_size, num_sentence_words)
         # The first input sentence.
         self.sentence_one = tf.placeholder("int32",
-                                           [None, None],
+                                           [None, self.num_sentence_words],
                                            name="sentence_one")
 
         # Shape: (batch_size, num_sentence_words)
         # The second input sentence.
         self.sentence_two = tf.placeholder("int32",
-                                           [None, None],
+                                           [None, self.num_sentence_words],
                                            name="sentence_two")
 
         # Shape: (batch_size, 2)
         # The true labels, encoded as a one-hot vector. So
         # [1, 0] indicates not duplicate, [0, 1] indicates duplicate.
         self.y_true = tf.placeholder("int32",
-                                     [None, 2],
+                                     [None, self.num_classes],
                                      name="true_labels")
 
         # A boolean that encodes whether we are training or evaluating
         self.is_train = tf.placeholder('bool', [], name='is_train')
 
+    def contrastive_loss(self, y, d, batch_size):
+        tmp = y * tf.square(d)
+        # tmp= tf.mul(y,tf.square(d))
+        tmp2 = (1 - y) * tf.square(tf.maximum((1 - d), 0))
+        return tf.reduce_sum(tmp + tmp2) / batch_size / 2
 
     @overrides
     def _build_forward(self):
@@ -171,123 +179,66 @@ class SiameseBiLSTM(BaseTFModel):
                     word_emb_mat,
                     self.sentence_two)
 
-        rnn_hidden_size = self.rnn_hidden_size
-        rnn_output_mode = self.rnn_output_mode
-        output_keep_prob = self.output_keep_prob
-        rnn_cell_fw_one = LSTMCell(rnn_hidden_size, state_is_tuple=True)
-        d_rnn_cell_fw_one = SwitchableDropoutWrapper(rnn_cell_fw_one,
-                                                     self.is_train,
-                                                     output_keep_prob=output_keep_prob)
-        rnn_cell_bw_one = LSTMCell(rnn_hidden_size, state_is_tuple=True)
-        d_rnn_cell_bw_one = SwitchableDropoutWrapper(rnn_cell_bw_one,
-                                                     self.is_train,
-                                                     output_keep_prob=output_keep_prob)
-        with tf.variable_scope("encode_sentences"):
-            # Encode the first sentence.
-            (fw_output_one, bw_output_one), _ = tf.nn.bidirectional_dynamic_rnn(
-                cell_fw=d_rnn_cell_fw_one,
-                cell_bw=d_rnn_cell_bw_one,
-                dtype="float",
-                sequence_length=sentence_one_len,
-                inputs=word_embedded_sentence_one,
-                scope="encoded_sentence_one")
-            if self.share_encoder_weights:
-                # Encode the second sentence, using the same RNN weights.
-                tf.get_variable_scope().reuse_variables()
-                (fw_output_two, bw_output_two), _ = tf.nn.bidirectional_dynamic_rnn(
-                    cell_fw=d_rnn_cell_fw_one,
-                    cell_bw=d_rnn_cell_bw_one,
-                    dtype="float",
-                    sequence_length=sentence_two_len,
-                    inputs=word_embedded_sentence_two,
-                    scope="encoded_sentence_one")
-            else:
-                # Encode the second sentence with a different RNN
-                rnn_cell_fw_two = LSTMCell(rnn_hidden_size, state_is_tuple=True)
-                d_rnn_cell_fw_two = SwitchableDropoutWrapper(
-                    rnn_cell_fw_two,
-                    self.is_train,
-                    output_keep_prob=output_keep_prob)
-                rnn_cell_bw_two = LSTMCell(rnn_hidden_size, state_is_tuple=True)
-                d_rnn_cell_bw_two = SwitchableDropoutWrapper(
-                    rnn_cell_bw_two,
-                    self.is_train,
-                    output_keep_prob=output_keep_prob)
-                (fw_output_two, bw_output_two), _ = tf.nn.bidirectional_dynamic_rnn(
-                    cell_fw=d_rnn_cell_fw_two,
-                    cell_bw=d_rnn_cell_bw_two,
-                    dtype="float",
-                    sequence_length=sentence_two_len,
-                    inputs=word_embedded_sentence_two,
-                    scope="encoded_sentence_two")
+        # Create a convolution + maxpool layer for each filter size
+        with tf.name_scope("output"):
+            with tf.name_scope("fw" + "side"), tf.variable_scope("fw" + "side"):
+                stacked_rnn_fw = []
+                for _ in range(3):
+                    fw_cell = tf.nn.rnn_cell.BasicLSTMCell(self.rnn_hidden_size, forget_bias=1.0, state_is_tuple=True)
+                    lstm_fw_cell = tf.contrib.rnn.DropoutWrapper(fw_cell, output_keep_prob=self.output_keep_prob)
+                    stacked_rnn_fw.append(lstm_fw_cell)
+                lstm_fw_cell_m = tf.nn.rnn_cell.MultiRNNCell(cells=stacked_rnn_fw, state_is_tuple=True)
 
-            # Now, combine the fw_output and bw_output for the
-            # first and second sentence LSTM outputs
-            if rnn_output_mode == "mean_pool":
-                # Mean pool the forward and backward RNN outputs
-                pooled_fw_output_one = mean_pool(fw_output_one,
-                                                 sentence_one_len)
-                pooled_bw_output_one = mean_pool(bw_output_one,
-                                                 sentence_one_len)
-                pooled_fw_output_two = mean_pool(fw_output_two,
-                                                 sentence_two_len)
-                pooled_bw_output_two = mean_pool(bw_output_two,
-                                                 sentence_two_len)
-                # Shape: (batch_size, 2*rnn_hidden_size)
-                encoded_sentence_one = tf.concat([pooled_fw_output_one,
-                                                  pooled_bw_output_one], 1)
-                encoded_sentence_two = tf.concat([pooled_fw_output_two,
-                                                  pooled_bw_output_two], 1)
-            elif rnn_output_mode == "last":
-                # Get the last unmasked output from the RNN
-                last_fw_output_one = last_relevant_output(fw_output_one,
-                                                          sentence_one_len)
-                last_bw_output_one = last_relevant_output(bw_output_one,
-                                                          sentence_one_len)
-                last_fw_output_two = last_relevant_output(fw_output_two,
-                                                          sentence_two_len)
-                last_bw_output_two = last_relevant_output(bw_output_two,
-                                                          sentence_two_len)
-                # Shape: (batch_size, 2*rnn_hidden_size)
-                encoded_sentence_one = tf.concat([last_fw_output_one,
-                                                  last_bw_output_one], 1)
-                encoded_sentence_two = tf.concat([last_fw_output_two,
-                                                  last_bw_output_two], 1)
-            else:
-                raise ValueError("Got an unexpected value {} for "
-                                 "rnn_output_mode, expected one of "
-                                 "[mean_pool, last]")
+            x = tf.unstack(tf.transpose(word_embedded_sentence_one, perm=[1, 0, 2]))
+            outputs, _ = tf.nn.static_rnn(lstm_fw_cell_m, x, dtype=tf.float32)
 
+            x2 = tf.unstack(tf.transpose(word_embedded_sentence_two, perm=[1, 0, 2]))
+            outputs2, _ = tf.nn.static_rnn(lstm_fw_cell_m, x2, dtype=tf.float32)
+            self.out1 = outputs[-1]
+            self.out2 = outputs2[-1]
+
+            self.distance = tf.sqrt(tf.reduce_sum(tf.square(tf.subtract(self.out1, self.out2)), 1, keep_dims=True))
+            self.distance = tf.div(self.distance,
+                                   tf.add(tf.sqrt(tf.reduce_sum(tf.square(self.out1), 1, keep_dims=True)),
+                                          tf.sqrt(tf.reduce_sum(tf.square(self.out2), 1, keep_dims=True))))
+            self.distance = tf.reshape(self.distance, [-1], name="distance")
+            # self.diff = tf.abs(tf.subtract(self.out1, self.out2), name='err_l1')
+            # self.diff = tf.reduce_sum(self.diff, axis=1)
+            # self.sim = tf.clip_by_value(tf.exp(-1.0 * self.diff), 1e-7, 1.0 - 1e-7)
+
+            self.pre_cate = tf.subtract(tf.ones_like(self.distance), tf.rint(self.distance),
+                                        name="pre_cate")  # auto threshold 0.5
+
+        argmax_true = tf.argmax(self.y_true, 1)
         with tf.name_scope("loss"):
             # Use the exponential of the negative L1 distance
             # between the two encoded sentences to get an output
             # distribution over labels.
             # Shape: (batch_size, 2)
-            self.y_pred = self._l1_similarity(encoded_sentence_one,
-                                              encoded_sentence_two)
+
             # Manually calculating cross-entropy, since we output
             # probabilities and can't use softmax_cross_entropy_with_logits
             # Add epsilon to the probabilities in order to prevent log(0)
-            self.loss = tf.reduce_mean(
-                -tf.reduce_sum(tf.cast(self.y_true, "float") *
-                               tf.log(self.y_pred),
-                               axis=1))
-            # self.loss = tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(tf.cast(self.y_true, "float"), self.y_pred, 0.4))
+            # self.loss = tf.reduce_mean(
+            #     -tf.reduce_sum(tf.cast(self.y_true, "float") *
+            #                    tf.log(self.y_pred),
+            #                    axis=1))
+            self.y_pred = tf.one_hot(tf.cast(self.pre_cate, "int64"), 2)
+
+            l2_losses = tf.add_n([tf.nn.l2_loss(v) for v in tf.trainable_variables() if 'bias' not in v.name]) * self.l2_lambda
+
+            self.loss = self.contrastive_loss(tf.cast(argmax_true, "float"), self.distance,  tf.cast(tf.shape(self.y_true)[0],"float")) + l2_losses
+            # self.loss = self.loss
 
         self.pre_cate = tf.argmax(self.y_pred, 1)
         argmax_pred = tf.argmax(self.y_pred, 1)
-        argmax_true = tf.argmax(self.y_true, 1)
 
         with tf.name_scope("accuracy"):
             # Get the correct predictions.
             # Shape: (batch_size,) of bool
-            correct_predictions = tf.equal(
-                argmax_pred,
-                argmax_true)
 
-            # Cast to float, and take the mean to get accuracy
-            self.accuracy = tf.reduce_mean(tf.cast(correct_predictions,
-                                                   "float"))
+            correct_predictions = tf.equal(self.pre_cate, argmax_true)
+            self.accuracy = tf.reduce_mean(tf.cast(correct_predictions, "float"), name="accuracy")
 
         TP = tf.count_nonzero(argmax_pred * argmax_true, dtype=tf.float32)
         TN = tf.count_nonzero((argmax_pred - 1) * (argmax_true - 1), dtype=tf.float32)
@@ -350,59 +301,3 @@ class SiameseBiLSTM(BaseTFModel):
                      self.is_train: False}
         return feed_dict
 
-    def _l1_similarity(self, sentence_one, sentence_two):
-        """
-        Given a pair of encoded sentences (vectors), return a probability
-        distribution on whether they are duplicates are not with:
-        exp(-||sentence_one - sentence_two||)
-
-        Parameters
-        ----------
-        sentence_one: Tensor
-            A tensor of shape (batch_size, 2*rnn_hidden_size) representing
-            the encoded sentence_ones to use in the probability calculation.
-
-        sentence_one: Tensor
-            A tensor of shape (batch_size, 2*rnn_hidden_size) representing
-            the encoded sentence_twos to use in the probability calculation.
-
-        Returns
-        -------
-        class_probabilities: Tensor
-            A tensor of shape (batch_size, 2), represnting the probability
-            that a pair of sentences are duplicates as
-            [is_not_duplicate, is_duplicate].
-        """
-        with tf.name_scope("l1_similarity"):
-            # Take the L1 norm of the two vectors.
-            # Shape: (batch_size, 2*rnn_hidden_size)
-            l1_distance = tf.abs(sentence_one - sentence_two)
-
-            # Take the sum for each sentence pair
-            # Shape: (batch_size, 1)
-            summed_l1_distance = tf.reduce_sum(l1_distance, axis=1,
-                                               keep_dims=True)
-
-            # Exponentiate the negative summed L1 distance to get the
-            # positive-class probability.
-            # Shape: (batch_size, 1)
-            positive_class_probs = tf.exp(-summed_l1_distance)
-
-            # Get the negative class probabilities by subtracting
-            # the positive class probabilities from 1.
-            # Shape: (batch_size, 1)
-            negative_class_probs = 1 - positive_class_probs
-
-            # Concatenate the positive and negative class probabilities
-            # Shape: (batch_size, 2)
-            class_probabilities = tf.concat([negative_class_probs,
-                                             positive_class_probs], 1)
-
-            # if class_probabilities has 0's, then taking the log of it
-            # (e.g. for cross-entropy loss) will cause NaNs. So we add
-            # epsilon and renormalize by the sum of the vector.
-            safe_class_probabilities = class_probabilities + 1e-08
-            safe_class_probabilities /= tf.reduce_sum(safe_class_probabilities,
-                                                      axis=1,
-                                                      keep_dims=True)
-            return safe_class_probabilities

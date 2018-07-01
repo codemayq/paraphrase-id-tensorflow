@@ -3,9 +3,11 @@ import csv
 import logging
 import os
 import random
+from io import open
+import six
+
 import sys
 
-import six
 if six.PY2:
     reload(sys)
     sys.setdefaultencoding('utf-8')
@@ -34,9 +36,10 @@ def main():
 
     # Get the data
     logger.info("Reading csv at {}".format(config.dataset_input_path))
-    with open(config.dataset_input_path) as f:
-        reader = csv.reader(f)
-        csv_rows = list(reader)
+    csv_rows = []
+    with open(config.dataset_input_path, encoding="UTF-8") as f:
+        for line in f:
+            csv_rows.append(line)
 
     logger.info("Shuffling input csv.")
     # For reproducibility
@@ -54,15 +57,14 @@ def main():
                                 input_filename + "_val_split" + input_ext)
 
     logger.info("Writing train split output to {}".format(train_out_path))
-    with open(train_out_path, "w") as f:
-        writer = csv.writer(f, quoting=csv.QUOTE_ALL)
-        writer.writerows(csv_rows[num_validation_lines:])
+    with open(train_out_path, "w", encoding="utf-8") as f:
+        for line in csv_rows[num_validation_lines:]:
+            f.write(line)
 
     logger.info("Writing validation split output to {}".format(val_out_path))
     with open(val_out_path, "w") as f:
-        writer = csv.writer(f, quoting=csv.QUOTE_ALL)
-        writer.writerows(csv_rows[:num_validation_lines])
-
+        for line in csv_rows[:num_validation_lines]:
+            f.write(line)
 
 if __name__ == "__main__":
     logging.basicConfig(format=("%(asctime)s - %(levelname)s - "
