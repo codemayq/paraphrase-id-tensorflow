@@ -6,7 +6,7 @@ from overrides import overrides
 
 from .instance import TextInstance, IndexedInstance
 from .instance_word import IndexedInstanceWord
-
+from ..tokenizers.word_tokenizers import ChineseWordTokenizer
 
 class STSInstance(TextInstance):
     """
@@ -33,8 +33,8 @@ class STSInstance(TextInstance):
 
     label_mapping = {0: [1, 0], 1: [0, 1], None: None}
 
-    def __init__(self, first_sentence, second_sentence, label):
-        super(STSInstance, self).__init__(label)
+    def __init__(self, first_sentence, second_sentence, label, tokenizer=None):
+        super(STSInstance, self).__init__(label, tokenizer)
         self.first_sentence_str = first_sentence
         self.second_sentence_str = second_sentence
         # Tokenize the string representations of the first
@@ -185,7 +185,6 @@ class IndexedSTSInstance(IndexedInstance):
                                         self.second_sentence_indices]
         return (first_sentence_char_indices, second_sentence_char_indices)
 
-    @classmethod
     @overrides
     def empty_instance(cls):
         return IndexedSTSInstance([], [], label=None)
@@ -247,24 +246,27 @@ class IndexedSTSInstance(IndexedInstance):
         self.first_sentence_indices = self.pad_sequence_to_length(
             self.first_sentence_indices,
             num_sentence_words,
-            default_value=IndexedInstanceWord.padding_instance_word)
+            default_value=IndexedInstanceWord.padding_instance_word,
+            truncate_from_right=False)
         self.second_sentence_indices = self.pad_sequence_to_length(
             self.second_sentence_indices,
             num_sentence_words,
-            default_value=IndexedInstanceWord.padding_instance_word)
+            default_value=IndexedInstanceWord.padding_instance_word,
+            truncate_from_right=False)
 
         # Pad at the character-level, adding 0 padding to character list
         for indexed_instance_word in self.first_sentence_indices:
             indexed_instance_word.char_indices = self.pad_sequence_to_length(
                 indexed_instance_word.char_indices,
-                num_word_characters)
+                num_word_characters,
+                truncate_from_right=False)
 
         for indexed_instance_word in self.second_sentence_indices:
             indexed_instance_word.char_indices = self.pad_sequence_to_length(
                 indexed_instance_word.char_indices,
-                num_word_characters)
+                num_word_characters,
+                truncate_from_right=False)
 
-    @overrides
     def as_training_data(self, mode="word"):
         """
         Transforms the instance into a collection of NumPy
@@ -308,14 +310,14 @@ class IndexedSTSInstance(IndexedInstance):
                                                      dtype="int32")
         if mode == "character":
             return ((first_sentence_char_matrix, second_sentence_char_matrix),
-                    (np.asarray(self.label),))
+                    (np.asarray(self.label),),())
         if mode == "word":
             return ((first_sentence_word_array, second_sentence_word_array),
-                    (np.asarray(self.label),))
+                    (np.asarray(self.label),),())
         if mode == "word+character":
             return ((first_sentence_word_array, first_sentence_char_matrix,
                      second_sentence_word_array, second_sentence_char_matrix),
-                    (np.asarray(self.label),))
+                    (np.asarray(self.label),),())
 
     @overrides
     def as_testing_data(self, mode="word"):
@@ -354,16 +356,15 @@ class IndexedSTSInstance(IndexedInstance):
                                                      dtype="int32")
         if mode == "character":
             return ((first_sentence_char_matrix, second_sentence_char_matrix),
-                    ())
+                    (),())
         if mode == "word":
             return ((first_sentence_word_array, second_sentence_word_array),
-                    ())
+                    (),())
         if mode == "word+character":
             return ((first_sentence_word_array, first_sentence_char_matrix,
                      second_sentence_word_array, second_sentence_char_matrix),
-                    ())
+                    (),())
 
-    @overrides
     def __eq__(self, other):
         """
         Checks for equality between this instance and another instance.
@@ -401,7 +402,6 @@ class IndexedSTSInstance(IndexedInstance):
         else:
             return False
 
-    @overrides
     def __lt__(self, other):
         """
         Checks for the less than relationship between this instance
@@ -437,3 +437,6 @@ class IndexedSTSInstance(IndexedInstance):
             return False
         else:
             return this_length < other_length
+
+
+

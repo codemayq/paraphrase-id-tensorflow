@@ -23,10 +23,9 @@ class DataIndexer:
         # setting where not all input is lowercase.
         self._padding_token = "@@PADDING@@"
         self._oov_token = "@@UNKOWN@@"
-        self.word_indices = defaultdict(self._default_namespace_word_indices_dict)
+        self.word_indices = {}
         self.is_fit = False
-        self.reverse_word_indices = defaultdict(
-            self._default_namespace_reverse_word_indices_dict)
+        self.reverse_word_indices = {}
 
     def _default_namespace_word_indices_dict(self):
         return {self._padding_token: 0, self._oov_token: 1}
@@ -65,13 +64,26 @@ class DataIndexer:
                              "{}".format(min_count, type(min_count)))
 
         logger.info("Fitting word dictionary with min count of %d", min_count)
-        namespace_word_counts = defaultdict(Counter)
+        namespace_word_counts = {}
+        if len(dataset.instances) > 0:
+            namespace_dict = dataset.instances[0].words()
+            for namespace in namespace_dict:
+                namespace_word_counts[namespace] = {}
+                self.word_indices[namespace] = {}
+                self.reverse_word_indices[namespace] = {}
+                for word, index in self._default_namespace_word_indices_dict().items():
+                    self.word_indices[namespace][word] = index
+                for index, word in self._default_namespace_reverse_word_indices_dict().items():
+                    self.reverse_word_indices[namespace][index] = word
+
         for instance in tqdm.tqdm(dataset.instances):
             # dictionary with keys as namespace names, and values asarray
             # the words for that namespace.
             namespace_dict = instance.words()
             for namespace in namespace_dict:
                 for word in namespace_dict[namespace]:
+                    if word not in namespace_word_counts[namespace]:
+                        namespace_word_counts[namespace][word] = 0
                     namespace_word_counts[namespace][word] += 1
         # Index the dataset, sorted by order of decreasing frequency, and then
         # alphabetically for ties.
@@ -102,10 +114,10 @@ class DataIndexer:
         index: int
             The index of the input word in the namespace.
         """
-        if not isinstance(word, str):
-            raise ValueError("Expected word to be type "
-                             "str, found {} of type "
-                             "{}".format(word, type(word)))
+        # if not isinstance(word, str):
+        #     raise ValueError("Expected word to be type "
+        #                      "str, found {} of type "
+        #                      "{}".format(word, type(word)))
         if word not in self.word_indices[namespace]:
             index = len(self.word_indices[namespace])
             self.word_indices[namespace][word] = index
@@ -151,10 +163,10 @@ class DataIndexer:
             The index of the input word if it is in the index, or the index
             corresponding to the OOV token if it is not.
         """
-        if not isinstance(word, str):
-            raise ValueError("Expected word to be type "
-                             "str, found {} of type "
-                             "{}".format(word, type(word)))
+        # if not isinstance(word, str):
+        #     raise ValueError("Expected word to be type "
+        #                      "str, found {} of type "
+        #                      "{}".format(word, type(word)))
         if word in self.word_indices[namespace]:
             return self.word_indices[namespace][word]
         else:

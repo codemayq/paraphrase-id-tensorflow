@@ -1,7 +1,8 @@
 import codecs
 import itertools
 import logging
-
+import copy
+import random
 from tqdm import tqdm
 
 from .instances.instance import Instance
@@ -9,7 +10,7 @@ from .instances.instance import Instance
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 
-class Dataset:
+class Dataset(object):
     """
     A collection of Instances. This base class has general methods that apply
     to all collections of Instances. That basically is just methods that
@@ -107,8 +108,9 @@ class TextDataset(Dataset):
                              instance in tqdm(self.instances)]
         return IndexedDataset(indexed_instances)
 
+
     @staticmethod
-    def read_from_file(filenames, instance_class):
+    def read_from_file(filenames, instance_class, need_sample_flag=False):
         """
         Read a dataset (basically a list of Instances) from
         a data file.
@@ -139,9 +141,30 @@ class TextDataset(Dataset):
                              "but was {} of type "
                              "{}".format(filenames, type(filenames)))
         logger.info("Reading files {} to a list of lines.".format(filenames))
-        lines = [x.strip() for filename in filenames
-                 for x in tqdm(codecs.open(filename,
-                                           "r", "utf-8").readlines())]
+        lines = []
+
+        def need_sample(line):
+            if len(line.split("\t")) == 4:
+                line_id, sent1, sent2, label = line.split("\t")
+                if label == "1":
+                    return True
+            return False
+
+        count = 0
+        for filename in filenames:
+            temp_lines = codecs.open(filename, "r", "utf-8").readlines()
+            for line in tqdm(temp_lines):
+                line = line.encode('utf-8').decode('utf-8-sig').strip()
+                line = line.strip()
+                if need_sample(line) and need_sample_flag:
+                    line_id, sent1, sent2, label = line.split("\t")
+                    line = "\t".join([line_id, sent2, sent1, label])
+                    lines.append(line)
+                    count += 1
+
+                lines.append(line)
+        logger.info("====================== sample {} ".format(str(count)))
+
         return TextDataset.read_from_lines(lines, instance_class)
 
     @staticmethod
@@ -168,13 +191,14 @@ class TextDataset(Dataset):
             raise ValueError("Expected lines to be a list, "
                              "but was {} of type "
                              "{}".format(lines, type(lines)))
-        if not isinstance(lines[0], str):
-            raise ValueError("Expected lines to be a list of strings, "
-                             "but the first element of the list was {} "
-                             "of type {}".format(lines[0], type(lines[0])))
+        # if not isinstance(lines[0], str):
+        #     raise ValueError("Expected lines to be a list of strings, "
+        #                      "but the first element of the list was {} "
+        #                      "of type {}".format(lines[0], type(lines[0])))
         logger.info("Creating list of {} instances from "
                     "list of lines.".format(instance_class))
         instances = [instance_class.read_from_line(line) for line in tqdm(lines)]
+
         labels = [(x.label, x) for x in instances]
         labels.sort(key=lambda x: str(x[0]))
         label_counts = [(label, len([x for x in group]))
@@ -243,7 +267,7 @@ class IndexedDataset(Dataset):
         for instance in tqdm(self.instances):
             instance.pad(lengths_to_use)
 
-    def as_training_data(self, mode="word"):
+    def as_training_data(self, mode="word", need_shuffle=True):
         """
         Takes each IndexedInstance and converts it into (inputs, labels),
         according to the Instance's as_training_data() method. Note that
@@ -260,6 +284,9 @@ class IndexedDataset(Dataset):
         inputs = []
         labels = []
         instances = self.instances
+        if need_shuffle:
+            random.shuffle(instances)
+
         for instance in instances:
             instance_inputs, label = instance.as_training_data(mode=mode)
             inputs.append(instance_inputs)

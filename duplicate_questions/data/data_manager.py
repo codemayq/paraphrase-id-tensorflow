@@ -1,5 +1,6 @@
 import logging
 import numpy as np
+import random
 from itertools import islice
 
 from .data_indexer import DataIndexer
@@ -22,7 +23,7 @@ class DataManager():
         self.training_data_max_lengths = {}
 
     @staticmethod
-    def get_batch_generator(get_instance_generator, batch_size):
+    def get_batch_generator(get_instance_generator, batch_size, need_shuffle=True):
         """
         Convenience function that, when called, produces a generator that yields
         individual instances as numpy arrays into a generator
@@ -56,16 +57,21 @@ class DataManager():
         instance_generator = get_instance_generator()
         batched_instances = list(islice(instance_generator, batch_size))
         while batched_instances:
+            # if need_shuffle:
+            #     random.shuffle(batched_instances)
             # Take the batched instances and create a batch from it.
             # The batch is a tuple ((inputs), targets), where (inputs)
             # can be (inputs0, inputs1, etc...). each of "inputs*" and
             # "targets" are numpy arrays.
             flattened = ([ins[0] for ins in batched_instances],
-                         [ins[1] for ins in batched_instances])
-            flattened_inputs, flattened_targets = flattened
+                         [ins[1] for ins in batched_instances],
+                         [ins[2] for ins in batched_instances],
+                         )
+            flattened_inputs, flattened_targets, flattened_lineids = flattened
             batch_inputs = tuple(map(np.array, tuple(zip(*flattened_inputs))))
             batch_targets = tuple(map(np.array, tuple(zip(*flattened_targets))))
-            yield batch_inputs, batch_targets
+            batch_lineids = tuple(map(np.array, tuple(zip(*flattened_lineids))))
+            yield batch_inputs, batch_targets, batch_lineids
             batched_instances = list(islice(instance_generator, batch_size))
 
     def get_train_data_from_file(self, filenames, min_count=1,
@@ -137,7 +143,7 @@ class DataManager():
                              "in a list of files.")
         logger.info("Getting training data from {}".format(filenames))
         training_dataset = TextDataset.read_from_file(filenames,
-                                                      self.instance_type)
+                                                      self.instance_type, True)
         if max_instances:
             logger.info("Truncating the training dataset "
                         "to {} instances".format(max_instances))
@@ -202,8 +208,8 @@ class DataManager():
                     indexed_instance.pad(max_lengths_to_use)
                 # Now, we want to take the instance and convert it into
                 # NumPy arrays suitable for training.
-                inputs, labels = indexed_instance.as_training_data(mode=mode)
-                yield inputs, labels
+                inputs, labels, lineids = indexed_instance.as_training_data(mode=mode)
+                yield inputs, labels, lineids
         return _get_train_data_generator, training_dataset_size
 
     def get_validation_data_from_file(self, filenames, max_instances=None,
@@ -324,9 +330,9 @@ class DataManager():
                     indexed_val_instance.pad(max_lengths_to_use)
                 # Now, we want to take the instance and convert it into
                 # NumPy arrays suitable for validation.
-                inputs, labels = indexed_val_instance.as_training_data(mode=mode)
+                inputs, labels,lineids = indexed_val_instance.as_training_data(mode=mode)
 
-                yield inputs, labels
+                yield inputs, labels, lineids
         return _get_validation_data_generator, validation_dataset_size
 
     def get_test_data_from_file(self, filenames, max_instances=None,

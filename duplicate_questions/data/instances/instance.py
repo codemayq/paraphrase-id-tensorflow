@@ -18,7 +18,7 @@ for use with TensorFlow.
 from ..tokenizers.word_tokenizers import NLTKWordTokenizer
 
 
-class Instance:
+class Instance(object):
     """
     A data instance, used either for training a neural network or for
     testing one.
@@ -187,6 +187,9 @@ class IndexedInstance(Instance):
     This would mean that ``"Jamie"`` and ``"Holly"`` were OOV to the
     ``DataIndexer``, and the other words were given indices.
     """
+    def __init__(self, label):
+        super(IndexedInstance, self).__init__(label)
+
     @classmethod
     def empty_instance(cls):
         """
@@ -356,3 +359,4 @@ class IndexedInstance(Instance):
                 padding_sequence.extend(truncated)
                 return padding_sequence
         return truncated
+
